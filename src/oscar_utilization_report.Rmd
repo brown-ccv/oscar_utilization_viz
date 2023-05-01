@@ -1,0 +1,327 @@
+---
+title: "Oscar Utilization"
+output: pdf_document
+subtitle: "Brown University Center for Computation & Visualization (CCV)"
+author: "Thomas Serre, Linnea Wolfe, & Paul Stey"
+---
+
+
+
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(ggplot2)
+library(dplyr)
+library(knitr)
+library(kableExtra)
+library(lubridate)
+library(stringr)
+
+
+FILENAME <- "../data/oscar_jobs_slurm_2017_and_2020.csv"
+#TS_FILE <- "/Users/pstey/projects/slurmdb/carney_condo_timeseries_20200812.csv"
+
+
+
+raw_df <- read.csv(FILENAME, stringsAsFactors = FALSE)
+
+jobs_df <- raw_df %>%
+  filter(
+    tres_alloc != ""
+  ) %>%
+  arrange(
+    start_time
+  )
+
+jobs_df$min_waiting_in_queue <- jobs_df$sec_waiting_in_queue/60
+jobs_df$is_priority_job      <- str_detect(jobs_df$qos_name, "pri-") | str_detect(jobs_df$qos_name, "priority")
+jobs_df$is_condo_job         <- str_detect(jobs_df$qos_name, "condo")
+jobs_df$cpu_core_hours       <- jobs_df$cpus_req * jobs_df$min_runtime * 60
+
+
+start <- min(ymd_hms(jobs_df[, "submit_time"]), na.rm = TRUE)
+end   <- max(ymd_hms(jobs_df[, "submit_time"]), na.rm = TRUE)
+
+mean_runtime   <- as.integer(mean(jobs_df$min_runtime))
+median_runtime <- as.integer(median(jobs_df$min_runtime))
+
+
+```
+
+# 1 Introduction
+
+This document contains summary information of the jobs submitted to Oscar via the SLURM scheduler. The jobs summarized in the present report were submitted to Oscar from `r start` to `r end`. The table below gives an overview of the jobs submitted over this period of time.
+
+
+```{r, echo = FALSE}
+
+get_gpu_requested <- function(v) {
+    n <- length(v)
+    res <- rep(0, n)
+    for (i in 1:n) {
+        chk <- grep("gpu:", v[i])
+        if (length(chk) == 0) {
+            next
+        }
+        else if (chk) {
+            if (str_detect(v[i], "PER_NODE:gpu:")) {
+                res[i] <- as.numeric(gsub("PER_NODE:gpu:", "", v[i]))
+            } else if (str_detect(v[i], "gpu:")) {
+                res[i] <- as.numeric(gsub("gpu:", "", v[i]))
+            }
+        }
+    }
+    res
+} 
+
+
+jobs_df$gpus_req <- get_gpu_requested(jobs_df[, "gres_req"])
+jobs_df$is_gpu_job <- jobs_df[, "gpus_req"] > 0
+
+jobs_df$submit_hour <- hour(jobs_df[, "submit_time"])
+jobs_df$submit_monthday <- mday(jobs_df[, "submit_time"])
+jobs_df$submit_weekday <- wday(jobs_df[, "submit_time"])
+
+ngpu_jobs <- sum(jobs_df[, "gpus_req"] > 0)
+    
+overview_df <- data.frame(Description = c("Total Jobs", 
+                                          "GPU Jobs", 
+                                          "Unique Users", 
+                                          "Median Run Time (min.)", 
+                                          "Median Wait in Queue (min.)", 
+                                          "Median CPUs Requested",
+                                          "Maximum CPUs Requested", 
+                                          "Mean Nodes Allocated",
+                                          "Median Nodes Allocated",
+                                          "Maximum Nodes Allocated",
+                                          "Median GPUs Requested",
+                                          "Maximum GPUs Requested"),
+                          Statistic = c(nrow(jobs_df), 
+                                        ngpu_jobs, 
+                                        length(unique(jobs_df[, "user"])), 
+                                        median(jobs_df[, "min_runtime"]), 
+                                        median(jobs_df[, "min_waiting_in_queue"]), 
+                                        median(jobs_df[, "cpus_req"]), 
+                                        max(jobs_df[, "cpus_req"]), 
+                                        mean(jobs_df[, "nodes_alloc"]),
+                                        median(jobs_df[, "nodes_alloc"]),
+                                        max(jobs_df[, "nodes_alloc"]),
+                                        median(jobs_df[jobs_df[, "gpus_req"] > 0, "gpus_req"]), 
+                                        max(jobs_df[, "gpus_req"]))
+                         )
+
+kable(overview_df, "latex", digits = 0, vline = "", linesep = "") %>%
+  kable_styling(position = "center")
+```
+
+
+```{r, echo = FALSE}
+jobs_df$start_day <- as_date(jobs_df[, "start_time"])
+
+daily_df <- jobs_df %>%
+  group_by(start_day) %>%
+  summarise(
+    num_jobs = n(),
+    num_priority = sum(is_priority_job),
+    num_condo = sum(is_condo_job),
+    prop_priority = mean(is_priority_job),
+    prop_condo = mean(is_condo_job),
+    num_gpu_jobs = sum(is_gpu_job),
+    prop_gpu_jobs = mean(is_gpu_job),
+    prop_multi_node_jobs = mean(nodes_alloc > 1),
+    cpu_core_hours = sum(cpu_core_hours)
+  ) %>%
+  arrange(start_day)
+
+daily_df$prop_normal <- 1 - (daily_df$prop_priority + daily_df$prop_condo)
+```
+
+
+```{r, echo = FALSE, message=FALSE, warning=FALSE}
+ggplot(daily_df, aes(x = start_day)) +
+  geom_line(aes(y = num_jobs), colour = "darkgreen") +
+  geom_smooth(aes(y = num_jobs)) +
+  xlab("Job Start Day") +
+  ylab("Number of Jobs") +
+  ggtitle("Number of Oscar Jobs Started Each Day")
+```
+
+
+```{r, echo = FALSE, message=FALSE, warning=FALSE}
+ggplot(daily_df, aes(x = start_day)) +
+  geom_line(aes(y = cpu_core_hours), colour = "darkgreen") +
+  geom_smooth(aes(y = cpu_core_hours)) +
+  xlab("Job Start Day") +
+  ylab("CPU Core-Hours") +
+  ggtitle("Total CPU Core-Hours Each Day")
+```
+
+
+
+```{r, echo = FALSE, message=FALSE, warning=FALSE}
+ggplot(qos_df, aes(x = start_day)) +
+  geom_line(aes(y = prop_multi_node_jobs), colour = "skyblue") +
+  geom_smooth(aes(y = prop_multi_node_jobs)) +
+  xlab("Job Start Day") +
+  ylab("Proportion of Jobs") +
+  ggtitle("Proportion of Multi-Node Jobs Started Each Day")
+```
+
+
+```{r, echo = FALSE, message=FALSE, warning=FALSE}
+ggplot(qos_df, aes(x = start_day)) +
+  geom_line(aes(y = num_gpu_jobs), colour = "navy") +
+  geom_smooth(aes(y = num_gpu_jobs)) +
+  xlab("Job Start Day") +
+  ylab("Number of GPU Jobs") +
+  ggtitle("Number of GPU Jobs Started Each Day")
+```
+
+
+```{r, echo = FALSE, message=FALSE, warning=FALSE}
+ggplot(qos_df, aes(x = start_day)) +
+  geom_line(aes(y = prop_gpu_jobs), colour = "navy") +
+  geom_smooth(aes(y = prop_gpu_jobs)) +
+  xlab("Job Start Day") +
+  ylab("Proportion of Jobs") +
+  ggtitle("Proportion of GPU Jobs Started Each Day")
+```
+
+
+
+```{r, echo = FALSE, message=FALSE, warning=FALSE}
+
+ggplot(qos_df, aes(x = start_day)) +
+  geom_line(aes(y = prop_condo), colour = "navy") +
+  geom_smooth(aes(y = prop_condo)) +
+  xlab("Job Start Day") +
+  ylab("Proportion of Jobs") +
+  ggtitle("Proportion of Oscar Jobs with Condo QoS")
+
+```
+
+
+
+```{r, echo = FALSE, message=FALSE, warning=FALSE}
+
+ggplot(qos_df, aes(x = start_day)) +
+  geom_line(aes(y = prop_normal), colour = "skyblue") +
+  geom_smooth(aes(y = prop_normal)) +
+  xlab("Job Start Day") +
+  ylab("Proportion") +
+  ggtitle("Proportion of Exploratory Account Jobs")
+
+```
+
+
+
+```{r, echo = FALSE, message=FALSE, warning=FALSE}
+
+ggplot(qos_df, aes(x = start_day)) +
+  geom_line(aes(y = prop_priority), colour = "purple") +
+  geom_smooth(aes(y = prop_priority)) +
+  xlab("Job Start Day") +
+  ylab("Proportion of Jobs") +
+  ggtitle("Proportion of Oscar Jobs with Priority QoS")
+
+```
+# 2 Quality-of-Service Jobs
+
+
+
+# 3 Job Run Times
+As the histogram below illustrates, the overwhelming majority of jobs had rather brief total run times (i.e., minutes, or a small number of hours). Although the mean run time for jobs was `r mean_runtime` minutes, this is highly skewed by a small number of very long-running jobs---the median run time is `r median_runtime` minutes. For example, of the `r nrow(jobs_df)` total jobs, there were `r sum(jobs_df$min_runtime > 20160)` with run times longer than 2 weeks. And of these, there were `r sum(jobs_df$min_runtime > 87600)` ran for two months or more, and `r sum(jobs_df$min_runtime > 131400)` that ran for three months or more.
+
+It is also worth mentioning that some of the plot and models discussed below are likely to be influenced by the more out-lying values on the run times and the in-queue wait times.
+
+
+```{r, echo = FALSE, message=FALSE, warning=FALSE}
+
+dat3 <- jobs_df[!jobs_df[, "min_runtime"] > 10000, ]
+
+ggplot(dat3, aes(x = min_runtime)) +
+    geom_histogram(fill = "skyblue", colour = "lightblue", binwidth = 80) +
+    xlab("Job Run Time (min.)")
+```
+
+
+# 4 Job Wait Times in Queue
+The histogram below illustrates the distribution of wait times in the queue (i.e., the time between when a job is submitted, and when it begins running). As this distribution suggests, the majority of the jobs are waiting only briefly in the queue. The bulk of the distribution is centered near 0, but note also the log tail indicating that a small number of jobs waited a long time in the queue before they began to run.^[The x-axis is truncated at 4000 minutes; a very small number of jobs waited longer than this before running] The median wait time in the queue across all jobs is `r median(jobs_df$min_waiting_in_queue)` minutes.
+```{r, echo = FALSE}
+drop_row2 <- jobs_df[, "min_waiting_in_queue"] > 4000 | jobs_df[, "min_waiting_in_queue"] < 0
+dat3 <- jobs_df[!drop_row2, ]
+
+ggplot(dat3, aes(x = min_waiting_in_queue)) +
+    geom_histogram(fill = "skyblue", colour = "lightblue",  binwidth = 70) +
+    xlab("Wait Time in Queue (min.)")
+
+```
+
+
+# 5 Jobs by User
+
+While the above sections describe job-level statistics, the current section briefly discusses some user-level usage statistics. 
+```{r, echo = FALSE, message=FALSE, warning=FALSE}
+
+user_df <- jobs_df %>%
+  group_by(user) %>%
+  summarise(
+    num_jobs = n(),
+    mean_cpus = mean(cpus_req),
+    mean_nodes = mean(nodes_alloc),
+    mean_gpus = mean(gpus_req),
+    total_core_hours = sum(cpus_req * min_runtime / 60),
+    total_gpu_hours = sum(gpus_req * min_runtime / 60),
+    median_sec_runtime = median(sec_runtime),
+    median_sec_wait_queue = median(sec_waiting_in_queue)
+  )
+```
+
+The histogram below indicates the distribution of number-of-jobs by user. As this plot illustrates, the overwhelming majority of users (i.e., `r round(100 * mean(user_df$num_jobs < 50000), 1)`%) ran fewer than 50000 jobs in the time interval from `r start` to `r end`.
+
+
+```{r, echo = FALSE, message=FALSE, warning=FALSE}
+ggplot(user_df, aes(x = num_jobs)) +
+    geom_histogram(fill = "skyblue", colour = "lightblue",  binwidth = 3500) +
+    xlab("Number of Total Jobs by User") +
+    xlim(c(0, 150000)) +
+    ylim(c(0, 50))
+```
+
+## 5.1 CPU Core-Hours by User
+
+```{r, echo = FALSE, message=FALSE, warning=FALSE}
+ggplot(user_df, aes(x = total_core_hours)) +
+    geom_histogram(fill = "skyblue", colour = "lightblue",  binwidth = 100000) +
+    xlab("Total Core-Hours by User") +
+    xlim(c(0, 5000000)) +
+    ylim(c(0, 50))
+
+```
+
+
+
+## 5.2 GPU Hours 
+
+We can also explore the usage of GPUs by user. In particular, the historgram below illustrates the distribution of total GPU-hours by user. Similar to CPU core-hours discussed above, a GPU-hour represents the number of GPUs used multiplied by the duration of the job in hours. So, for example, a job that uses 2 GPUs for a duration of 6 hours counts as 12 GPU-hours.
+```{r, echo = FALSE, message=FALSE, warning=FALSE}
+
+
+ggplot(user_df, aes(x = total_gpu_hours)) +
+    geom_histogram(fill = "mediumpurple3", colour = "mediumpurple1",  binwidth = 25000) +
+    xlab("Total GPU-Hours by User") +
+    xlim(c(0, 1000000)) +
+    ylim(c(0, 50))
+```
+
+
+```{r, echo = FALSE, message=FALSE, warning=FALSE}
+ggplot(dat3, aes(min_waiting_in_queue, colour = is_gpu_job)) +
+  stat_ecdf() +
+  xlim(c(0, 2880)) +
+  labs(x = "Time Waiting in Queue (min.)", y = "Proportion", col = "GPU Job")
+```
+
+
+
